@@ -2,6 +2,7 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 
@@ -32,9 +33,11 @@ function ensureDirectoryUsable(dir, opts = {}) {
                 fs.accessSync(subdir, fs.constants.R_OK);
             } catch (err) {
                 if (err && (err.code === 'EACCES' || err.code === 'EPERM')) {
-                    console.warn(`[Flmngr] Skipping directory "${dir}" from ${source}: subdirectory "${entry.name}" is not accessible (${err.code}).`);
-                    return { ok: false, reason: 'subdir', error: err };
+                    console.warn(`[Flmngr] Skipping subdirectory "${entry.name}" under "${dir}" from ${source}: not accessible (${err.code}).`);
+                    continue;
                 }
+                console.warn(`[Flmngr] Unable to access subdirectory "${entry.name}" under "${dir}" from ${source}: ${err.message}`);
+                return { ok: false, reason: 'subdir', error: err };
             }
         }
     } catch (err) {
@@ -52,8 +55,17 @@ function resolveFilesDirectory() {
         ? path.resolve(process.env.FLMNGR_ROOT_DIR)
         : null;
 
+    const getuid = typeof process.getuid === 'function' ? process.getuid : null;
+    const isRootUser = getuid ? getuid() === 0 : false;
+    const userRootDir = isRootUser ? path.resolve('/') : os.homedir();
+
+    if (!userRootDir) {
+        console.warn('[Flmngr] Unable to determine home directory for the current user; falling back to application default.');
+    }
+
     const candidates = [
         { dir: configuredDir, source: 'FLMNGR_ROOT_DIR' },
+        { dir: userRootDir, source: isRootUser ? 'root user directory "/"' : 'current user home directory' },
         { dir: DEFAULT_FILES_DIR, source: 'application default' }
     ].filter(candidate => !!candidate.dir);
 
@@ -61,6 +73,14 @@ function resolveFilesDirectory() {
         const result = ensureDirectoryUsable(candidate.dir, { source: candidate.source });
         if (result.ok) {
             return candidate.dir;
+        }
+
+        if (
+            candidate.source.includes('home') &&
+            result.reason === 'access' &&
+            process.platform === 'darwin'
+        ) {
+            console.warn('[Flmngr] macOS may require granting Full Disk Access to this application to use the home directory.');
         }
     }
 
@@ -155,4 +175,3 @@ app.on('error', (err) => {
   }
   process.exit(1); // Exit with an error code
 });
-
