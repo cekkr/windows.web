@@ -5,6 +5,8 @@ const fs = require('fs');
 const os = require('os');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const connectBusboy = require('connect-busboy');
+const { FlmngrServer } = require('@flmngr/flmngr-server-node');
 
 const DEFAULT_FILES_DIR = path.join(__dirname, 'files');
 
@@ -94,8 +96,288 @@ function resolveSafePath(baseDir, requestedPath) {
     return { safeBase, safePath };
 }
 
-// THIS IS THE CORRECT SERVER-SIDE IMPORT
-const flmngr_express = require('@flmngr/flmngr-server-node-express');
+function toStringOrDefault(req, name, defaultValue = null) {
+    if (!req.body) return defaultValue;
+    const value = req.body[name];
+    return typeof value === 'string' ? value : defaultValue;
+}
+
+function toArray(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string') return [value];
+    return [];
+}
+
+function toInteger(value, defaultValue) {
+    if (typeof value === 'number' && Number.isInteger(value)) {
+        return value;
+    }
+    if (typeof value === 'string' && value.trim().length > 0) {
+        const parsed = Number.parseInt(value, 10);
+        if (!Number.isNaN(parsed)) return parsed;
+    }
+    return defaultValue;
+}
+
+function createRequestWrapper(req) {
+    return {
+        getParameterNumber(name, defaultValue) {
+            const raw = toStringOrDefault(req, name, null);
+            if (raw !== null && `${parseInt(raw, 10)}` === raw) {
+                return parseInt(raw, 10);
+            }
+            return defaultValue;
+        },
+        getParameterString(name, defaultValue) {
+            const value = toStringOrDefault(req, name, null);
+            return value !== null ? value : defaultValue;
+        },
+        getParameterStringArray(name, defaultValue) {
+            if (!req.body) return defaultValue;
+            const value = req.body[name];
+            if (typeof value === 'string') return [value];
+            if (Array.isArray(value)) return value;
+            return defaultValue;
+        },
+        getParameterFile(name) {
+            if (!req.postFile || name !== 'file') return null;
+            const rawName = req.postFile.filename;
+            let resolvedName = rawName;
+            if (rawName && typeof rawName === 'object' && typeof rawName.filename === 'string') {
+                resolvedName = rawName.filename;
+            }
+            return {
+                data: req.postFile.data,
+                fileName: resolvedName || ''
+            };
+        }
+    };
+}
+
+function wildcardToRegExp(pattern) {
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+        .replace(/\\\*/g, '.*')
+        .replace(/\\\?/g, '.');
+    return new RegExp(`^${escaped}$`);
+}
+
+function compileHidePatterns(patterns) {
+    return patterns
+        .filter(Boolean)
+        .map(pattern => ({ pattern, regex: wildcardToRegExp(pattern) }));
+}
+
+function isPermissionError(err) {
+    return Boolean(err && (err.code === 'EACCES' || err.code === 'EPERM'));
+}
+
+function buildDirectoryListing(baseDir, options = {}) {
+    const baseResolved = path.resolve(baseDir);
+    const hidePatterns = compileHidePatterns([
+        ...toArray(options.hideDirs),
+        '.cache'
+    ]);
+    const maxDepthRaw = toInteger(options.maxDepth, 99);
+    const maxDepth = Math.max(0, maxDepthRaw);
+    const depthLimit = Math.min(maxDepth, 20);
+
+    let fromDir = typeof options.fromDir === 'string' ? options.fromDir : '';
+    fromDir = '/' + fromDir.replace(/^\/+/, '').replace(/\/+$/, '');
+    if (fromDir === '/') {
+        fromDir = '';
+    }
+    if (fromDir.includes('..')) {
+        return [];
+    }
+    const relativeFrom = fromDir.replace(/^\/+/, '');
+    const fromSegments = relativeFrom.length > 0 ? relativeFrom.split('/').filter(Boolean) : [];
+    const startAbsolute = path.resolve(baseResolved, relativeFrom);
+    if (path.relative(baseResolved, startAbsolute).startsWith('..')) {
+        return [];
+    }
+
+    let stats;
+    try {
+        stats = fs.statSync(startAbsolute);
+    } catch (err) {
+        if (isPermissionError(err)) {
+            console.warn(`[Flmngr] Cannot access directory "${startAbsolute}": ${err.code}. Skipping.`);
+            return [];
+        }
+        if (err && err.code === 'ENOENT') {
+            return [];
+        }
+        throw err;
+    }
+
+    if (!stats.isDirectory()) {
+        return [];
+    }
+
+    const rootNameCandidate = baseResolved.replace(/\/+$/, '') || baseResolved;
+    let rootLabel = path.basename(rootNameCandidate);
+    if (!rootLabel || rootLabel === path.sep) {
+        rootLabel = 'Files';
+    }
+
+    const prefixSegments = rootLabel ? [rootLabel] : [];
+    const results = [];
+    const pathsSeen = new Set();
+    const visited = new Set();
+
+    function traverse(currentPath, relativeSegments, depth) {
+        let realPath;
+        try {
+            realPath = fs.realpathSync(currentPath);
+        } catch (err) {
+            if (isPermissionError(err)) {
+                console.warn(`[Flmngr] Unable to resolve path "${currentPath}": ${err.code}. Skipping.`);
+                return;
+            }
+            realPath = currentPath;
+        }
+
+        if (visited.has(realPath)) {
+            return;
+        }
+        visited.add(realPath);
+
+        const displaySegments = prefixSegments.concat(relativeSegments);
+        const displayPath = `/${displaySegments.join('/')}`;
+
+        if (!pathsSeen.has(displayPath)) {
+            results.push({ path: displayPath, depth });
+            pathsSeen.add(displayPath);
+        }
+
+        if (depth >= depthLimit) {
+            return;
+        }
+
+        let entries;
+        try {
+            entries = fs.readdirSync(currentPath, { withFileTypes: true });
+        } catch (err) {
+            if (isPermissionError(err)) {
+                console.warn(`[Flmngr] Unable to list directory "${displayPath}": ${err.code}.`);
+                return;
+            }
+            if (err && err.code === 'ENOENT') {
+                return;
+            }
+            throw err;
+        }
+
+        entries
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .forEach(entry => {
+                const name = entry.name;
+                if (hidePatterns.some(pattern => pattern.regex.test(name))) {
+                    return;
+                }
+
+                const childAbsolute = path.join(currentPath, name);
+                let isDir = entry.isDirectory();
+
+                if (!isDir) {
+                    try {
+                        isDir = fs.statSync(childAbsolute).isDirectory();
+                    } catch (err) {
+                        if (isPermissionError(err)) {
+                            console.warn(`[Flmngr] Skipping inaccessible entry "${childAbsolute}": ${err.code}.`);
+                            return;
+                        }
+                        if (err && err.code === 'ENOENT') {
+                            return;
+                        }
+                        console.warn(`[Flmngr] Error inspecting "${childAbsolute}": ${err.message}`);
+                        return;
+                    }
+                }
+
+                if (!isDir) {
+                    return;
+                }
+
+                traverse(childAbsolute, relativeSegments.concat(name), depth + 1);
+            });
+    }
+
+    try {
+        traverse(startAbsolute, fromSegments, 0);
+    } catch (err) {
+        if (!isPermissionError(err)) {
+            throw err;
+        }
+    }
+
+    return results.map(entry => ({
+        p: entry.path,
+        filled: entry.depth < depthLimit,
+        f: 0,
+        d: 0
+    }));
+}
+
+function sendFlmngrResponse(res, status, headers, payload) {
+    if (headers && typeof headers === 'object') {
+        Object.entries(headers).forEach(([header, value]) => {
+            if (typeof value !== 'undefined') {
+                res.setHeader(header, value);
+            }
+        });
+    }
+
+    res.status(status);
+
+    if (typeof payload === 'string') {
+        res.send(payload);
+        return;
+    }
+
+    if (payload && typeof payload === 'object' && typeof payload.pipe === 'function') {
+        payload.pipe(res);
+        return;
+    }
+
+    res.json(payload);
+}
+
+async function handleFlmngrRequest(req, res, filesDir, baseConfig) {
+    const action = (toStringOrDefault(req, 'action', '') || '').trim();
+
+    if (action === 'dirList') {
+        const data = buildDirectoryListing(filesDir, {
+            fromDir: toStringOrDefault(req, 'fromDir', ''),
+            hideDirs: req.body ? req.body.hideDirs : [],
+            maxDepth: req.body ? req.body.maxDepth : undefined
+        });
+        res.status(200).json({ error: null, data });
+        return;
+    }
+
+    const requestWrapper = createRequestWrapper(req);
+    const config = {
+        ...baseConfig,
+        request: requestWrapper
+    };
+
+    try {
+        await FlmngrServer.flmngrRequest(config, {
+            onFinish: (status, headers, payload) => {
+                sendFlmngrResponse(res, status, headers, payload);
+            },
+            onLogError: (error) => {
+                console.error(error);
+            }
+        }, 'express');
+    } catch (err) {
+        console.error('[Flmngr] Request processing failed:', err);
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Internal Server Error', data: null });
+        }
+    }
+}
 
 // --- Setup paths ---
 const app = express();
@@ -116,11 +398,81 @@ try {
     throw err;
 }
 
-// Use 'bindFlmngr' to automatically create the '/flmngr' API endpoint
-flmngr_express.bindFlmngr({
-    app: app,
-    urlFileManager: "/flmngr", // The API route Flmngr client will call
-    dirFiles: filesDir        // The REAL directory on your server
+const flmngrConfig = {
+    dirFiles: filesDir,
+    dirCache: path.join(filesDir, '.cache')
+};
+
+app.use('/flmngr', connectBusboy());
+app.use('/flmngr', bodyParser.urlencoded({ extended: true }));
+
+app.post('/flmngr', (req, res) => {
+    if (!req.body) {
+        req.body = {};
+    }
+    req.postFile = null;
+
+    const finalize = () => {
+        Promise
+            .resolve(handleFlmngrRequest(req, res, filesDir, flmngrConfig))
+            .catch(err => {
+                console.error('[Flmngr] Handler error:', err);
+                if (!res.headersSent) {
+                    res.status(500).json({ error: 'Internal Server Error', data: null });
+                }
+            });
+    };
+
+    const contentType = (req.headers['content-type'] || '').toLowerCase();
+    const useBusboy = req.busboy && /^multipart\//i.test(contentType);
+
+    if (!useBusboy) {
+        finalize();
+        return;
+    }
+
+    req.busboy.on('file', (fieldname, file, filename) => {
+        if (fieldname !== 'file') {
+            file.resume();
+            return;
+        }
+
+        req.postFile = {
+            filename,
+            data: null
+        };
+
+        file.on('data', (data) => {
+            req.postFile.data = req.postFile.data ? Buffer.concat([req.postFile.data, data]) : data;
+        });
+
+        file.on('limit', () => {
+            console.warn(`[Flmngr] Upload for "${filename}" exceeded busboy limit.`);
+        });
+    });
+
+    req.busboy.on('field', (fieldname, val) => {
+        if (Object.prototype.hasOwnProperty.call(req.body, fieldname)) {
+            if (Array.isArray(req.body[fieldname])) {
+                req.body[fieldname].push(val);
+            } else {
+                req.body[fieldname] = [req.body[fieldname], val];
+            }
+        } else {
+            req.body[fieldname] = val;
+        }
+    });
+
+    req.busboy.on('error', (err) => {
+        console.error('[Flmngr] Busboy error:', err);
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Upload parser error', data: null });
+        }
+    });
+
+    req.busboy.on('finish', finalize);
+
+    req.pipe(req.busboy);
 });
 
 console.log(`Flmngr API endpoint registered at /flmngr`);
