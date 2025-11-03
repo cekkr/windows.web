@@ -6,8 +6,8 @@ import fs from 'fs';
 import cors from 'cors';
 import bodyParser from 'body-parser';
 
-// THIS IS THE CORRECT IMPORT YOU SAID
-import { Flmngr } from 'flmngr';
+// THIS IS THE CORRECT SERVER-SIDE IMPORT
+import { bindFlmngr } from '@flmngr/flmngr-server-node-express';
 
 // --- Setup paths ---
 const __filename = fileURLToPath(import.meta.url);
@@ -18,29 +18,22 @@ const port = 3000;
 // --- Middlewares ---
 app.use(cors());
 app.use(bodyParser.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
-// --- Serve Flmngr Client Files ---
-// This finds the 'flmngr' package in node_modules and serves its files
-try {
-    // Get the directory of the 'flmngr' package
-    const flmngrDir = path.dirname(fileURLToPath(import.meta.resolve('flmngr')));
-    // Serve its client-side files from a route, e.g., /flmngr-client
-    app.use('/flmngr-client', express.static(flmngrDir));
-    console.log(`Serving Flmngr client files from: ${flmngrDir}`);
-} catch (e) {
-    console.error("Could not find 'flmngr' package. Did you run 'npm install flmngr'?", e);
-}
+app.use(express.static(path.join(__dirname, 'public'))); // Serve index.html, app.js, etc.
 
 // --- Flmngr Backend API Endpoint ---
 const filesDir = path.join(__dirname, 'files');
-app.all('/flmngr', (req, res) => {
-    Flmngr.local({
-        dir: filesDir
-    }, req, res);
+
+// Use 'bindFlmngr' to automatically create the '/flmngr' API endpoint
+bindFlmngr({
+    app: app,
+    urlFileManager: "/flmngr", // The API route Flmngr client will call
+    dirFiles: filesDir        // The REAL directory on your server
 });
 
-// --- Custom API for Codemirror Editor ---
+console.log(`Flmngr API endpoint registered at /flmngr`);
+console.log(`Serving files from: ${filesDir}`);
+
+// --- Custom API for Codemirror (This remains the same) ---
 app.get('/api/read', (req, res) => {
     const filePath = req.query.path;
     const safeBase = path.resolve(filesDir);
@@ -74,5 +67,4 @@ app.post('/api/save', (req, res) => {
 // --- Start Server ---
 app.listen(port, () => {
     console.log(`Mini OS File Manager listening at http://localhost:${port}`);
-    console.log(`Serving local files from: ${filesDir}`);
 });
