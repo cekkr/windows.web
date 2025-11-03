@@ -148,10 +148,21 @@ document.addEventListener("DOMContentLoaded", () => {
     const textualExtensions = ['txt', 'js', 'json', 'css', 'html', 'md', 'xml', 'svg'];
 
     // Flmngr (from the CDN script) attaches itself to the 'window' object
-    window.Flmngr.open({
+    const flmngr = window.Flmngr;
+    if (!flmngr || typeof flmngr.mount !== 'function') {
+        console.error('Flmngr library failed to load; check the CDN script reference.');
+        return;
+    }
+
+    const fileManagerHost = document.querySelector('#filemanager');
+    if (!fileManagerHost) {
+        console.error('Missing #filemanager element to mount Flmngr UI.');
+        return;
+    }
+
+    flmngr.mount(fileManagerHost, {
         apiKey: "FLMNFLMN", // Public key for localhost testing
         urlFileManager: "/flmngr", // Our Node.js backend endpoint
-        element: "#filemanager",
 
         // The callback to intercept file clicks
         onItemClick(item) {
