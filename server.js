@@ -1,17 +1,15 @@
 // server.js
-import express from 'express';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import fs from 'fs';
-import cors from 'cors';
-import bodyParser from 'body-parser';
+const express = require('express');
+const path = require('path');
+const { fileURLToPath } = require('url');
+const fs = require('fs');
+const cors = require('cors');
+const bodyParser = require('body-parser');
 
 // THIS IS THE CORRECT SERVER-SIDE IMPORT
-import { bindFlmngr } from '@flmngr/flmngr-server-node-express';
+const flmngr_express = require('@flmngr/flmngr-server-node-express');
 
 // --- Setup paths ---
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const app = express();
 const port = 3000;
 
@@ -24,7 +22,7 @@ app.use(express.static(path.join(__dirname, 'public'))); // Serve index.html, ap
 const filesDir = path.join(__dirname, 'files');
 
 // Use 'bindFlmngr' to automatically create the '/flmngr' API endpoint
-bindFlmngr({
+flmngr_express.bindFlmngr({
     app: app,
     urlFileManager: "/flmngr", // The API route Flmngr client will call
     dirFiles: filesDir        // The REAL directory on your server
