@@ -598,8 +598,40 @@ app.get('/api/read', (req, res) => {
     }
 
     fs.readFile(safePath, 'utf8', (err, data) => {
-        if (err) return res.status(500).send('Error reading file');
+        if (err) {
+            console.error(`[Read] ${safePath}: ${err.message}`);
+            return res.status(500).send('Error reading file');
+        }
         res.send(data);
+    });
+});
+
+app.get('/api/pdf', (req, res) => {
+    const filePath = req.query.path;
+    if (typeof filePath !== 'string') {
+        return res.status(400).send('Bad Request: Missing path parameter');
+    }
+    const { safeBase, safePath } = resolveSafePath(filesDir, filePath);
+
+    if (!safePath.startsWith(safeBase)) {
+        return res.status(403).send('Forbidden: Access Denied');
+    }
+
+    if (path.extname(safePath).toLowerCase() !== '.pdf') {
+        return res.status(400).send('Bad Request: Only PDF files are supported');
+    }
+
+    const headers = {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': 'inline'
+    };
+
+    res.sendFile(safePath, { headers }, (err) => {
+        if (err) {
+            if (!res.headersSent) {
+                res.status(err.statusCode || 500).send('Error loading PDF');
+            }
+        }
     });
 });
 

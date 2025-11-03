@@ -19,7 +19,74 @@ const langExtensions = {
     txt: () => [] // No specific language for .txt
 };
 
-let editorInstance = null; // To hold the active Codemirror instance
+const textualExtensions = ['txt', 'js', 'json', 'css', 'html', 'md', 'xml', 'svg'];
+const pdfExtensions = ['pdf'];
+const itemCache = new Map();
+const pathAttributeCandidates = [
+    'data-entry-path',
+    'data-path',
+    'data-item-path',
+    'data-file-path',
+    'data-by-n1ed-path',
+    'data-url',
+    'data-value'
+];
+
+function getFileExtension(fileName) {
+    if (typeof fileName !== 'string') return '';
+    const parts = fileName.split('.');
+    if (parts.length <= 1) return '';
+    return parts.pop().toLowerCase();
+}
+
+function normalizeItemPath(value) {
+    if (typeof value !== 'string') return null;
+    let normalized = value.replace(/\\/g, '/');
+    if (!normalized.startsWith('/')) {
+        normalized = `/${normalized.replace(/^\/+/, '')}`;
+    }
+    return normalized;
+}
+
+function cacheItem(item) {
+    if (!item || typeof item.path !== 'string') return;
+    const normalized = normalizeItemPath(item.path);
+    if (normalized) {
+        itemCache.set(normalized, item);
+    }
+    itemCache.set(item.path, item);
+}
+
+function canOpenInEditor(item) {
+    if (!item || !item.isFile) return false;
+    return textualExtensions.includes(getFileExtension(item.name));
+}
+
+function canPreviewPdf(item) {
+    if (!item || !item.isFile) return false;
+    return pdfExtensions.includes(getFileExtension(item.name));
+}
+
+function extractItemFromEvent(target) {
+    let node = target && target.nodeType === Node.ELEMENT_NODE ? target : target?.parentElement;
+    while (node && node !== document.body) {
+        for (const attr of pathAttributeCandidates) {
+            if (node.hasAttribute && node.hasAttribute(attr)) {
+                const rawPath = node.getAttribute(attr);
+                const normalized = normalizeItemPath(rawPath);
+                if (normalized) {
+                    return itemCache.get(normalized) || {
+                        path: normalized,
+                        name: normalized.split('/').pop() || '',
+                        isFile: true
+                    };
+                }
+            }
+        }
+        node = node.parentElement;
+    }
+    return null;
+}
 
 /**
  * Creates and opens the editor window
@@ -49,10 +116,11 @@ async function openEditorWindow(filePath) {
         titleEl.textContent = filePath;
 
         // 4. Initialize Codemirror
-        const fileExt = filePath.split('.').pop();
-        const langExt = (langExtensions[fileExt] || (() => []))();
+        const fileExt = getFileExtension(filePath);
+        const langFactory = langExtensions[fileExt] || (() => []);
+        const langExt = langFactory();
 
-        let startState = EditorState.create({
+        const startState = EditorState.create({
             doc: fileContent,
             extensions: [
                 keymap.of(defaultKeymap),
@@ -60,20 +128,19 @@ async function openEditorWindow(filePath) {
             ]
         });
 
-        editorInstance = new EditorView({
+        const editorView = new EditorView({
             state: startState,
             parent: contentEl
         });
 
         // 5. Add event listeners for Save and Close
         closeBtn.addEventListener('click', () => {
-            editorInstance.destroy();
+            editorView.destroy();
             newWindow.remove();
-            editorInstance = null;
         });
 
         saveBtn.addEventListener('click', async () => {
-            const currentContent = editorInstance.state.doc.toString();
+            const currentContent = editorView.state.doc.toString();
             saveBtn.textContent = 'Saving...';
             try {
                 const saveResponse = await fetch('/api/save', {
@@ -105,6 +172,46 @@ async function openEditorWindow(filePath) {
     } catch (err) {
         console.error(err);
         alert('Error opening file: ' + err.message);
+    }
+}
+
+/**
+ * Creates and opens a PDF preview window
+ * @param {string} filePath - The path of the PDF file to preview
+ */
+function openPdfWindow(filePath) {
+    try {
+        const template = document.getElementById('pdf-window-template');
+        if (!template) {
+            throw new Error('PDF window template missing in DOM');
+        }
+
+        const newWindow = template.cloneNode(true);
+        newWindow.style.display = 'flex';
+        newWindow.id = `pdf-window-${Date.now()}`;
+
+        const headerEl = newWindow.querySelector('.editor-header');
+        const titleEl = newWindow.querySelector('.editor-title');
+        const closeBtn = newWindow.querySelector('.editor-close');
+        const frameEl = newWindow.querySelector('.pdf-frame');
+
+        if (!frameEl) {
+            throw new Error('PDF frame element missing');
+        }
+
+        titleEl.textContent = filePath;
+        frameEl.src = `/api/pdf?path=${encodeURIComponent(filePath)}`;
+
+        closeBtn.addEventListener('click', () => {
+            frameEl.src = '';
+            newWindow.remove();
+        });
+
+        document.body.appendChild(newWindow);
+        makeDraggable(newWindow, headerEl);
+    } catch (err) {
+        console.error(err);
+        alert('Unable to open PDF: ' + err.message);
     }
 }
 
@@ -143,11 +250,13 @@ function makeDraggable(el, header) {
 // We wrap this in a DOMContentLoaded listener to ensure
 // the #filemanager div and Flmngr script exist.
 document.addEventListener("DOMContentLoaded", () => {
-    
-    // List of file extensions we want to open in Codemirror
-    const textualExtensions = ['txt', 'js', 'json', 'css', 'html', 'md', 'xml', 'svg'];
+    const editorButton = document.getElementById('open-editor-btn');
+    const pdfButton = document.getElementById('preview-pdf-btn');
+    const contextMenu = document.getElementById('file-context-menu');
+    const contextEditorButton = contextMenu ? contextMenu.querySelector('[data-action="open-editor"]') : null;
+    const contextPdfButton = contextMenu ? contextMenu.querySelector('[data-action="preview-pdf"]') : null;
+    let selectedItem = null;
 
-    // Flmngr (from the CDN script) attaches itself to the 'window' object
     const flmngr = window.Flmngr;
     if (!flmngr || typeof flmngr.mount !== 'function') {
         console.error('Flmngr library failed to load; check the CDN script reference.');
@@ -160,19 +269,164 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
     }
 
-    flmngr.mount(fileManagerHost, {
-        apiKey: "FLMNFLMN", // Public key for localhost testing
-        urlFileManager: "/flmngr", // Our Node.js backend endpoint
+    function hideContextMenu() {
+        if (!contextMenu) return;
+        contextMenu.classList.remove('visible');
+        contextMenu.style.display = 'none';
+    }
 
-        // The callback to intercept file clicks
-        onItemClick(item) {
-            const ext = item.name.split('.').pop().toLowerCase();
+    function showContextMenu(x, y) {
+        if (!contextMenu) return;
+        // Ensure menu fits viewport
+        contextMenu.style.display = 'flex';
+        contextMenu.classList.add('visible');
+        const menuRect = contextMenu.getBoundingClientRect();
+        const maxX = window.innerWidth - menuRect.width - 8;
+        const maxY = window.innerHeight - menuRect.height - 8;
+        const left = Math.min(x, Math.max(0, maxX));
+        const top = Math.min(y, Math.max(0, maxY));
+        contextMenu.style.left = `${left}px`;
+        contextMenu.style.top = `${top}px`;
+    }
 
-            if (item.isFile && textualExtensions.includes(ext)) {
-                openEditorWindow(item.path); 
-                return false; // Prevent default download behavior
+    function updateContextMenuButtons() {
+        if (!contextMenu) return;
+        if (contextEditorButton) {
+            contextEditorButton.disabled = !canOpenInEditor(selectedItem);
+        }
+        if (contextPdfButton) {
+            contextPdfButton.disabled = !canPreviewPdf(selectedItem);
+        }
+    }
+
+    function updateToolbarButtons() {
+        if (!editorButton || !pdfButton) {
+            return;
+        }
+        if (!selectedItem || !selectedItem.isFile) {
+            editorButton.disabled = true;
+            pdfButton.disabled = true;
+            updateContextMenuButtons();
+            return;
+        }
+
+        editorButton.disabled = !canOpenInEditor(selectedItem);
+        pdfButton.disabled = !canPreviewPdf(selectedItem);
+        updateContextMenuButtons();
+    }
+
+    function setSelectedItem(item) {
+        selectedItem = item;
+        updateToolbarButtons();
+    }
+
+    if (editorButton) {
+        editorButton.addEventListener('click', () => {
+            if (selectedItem && selectedItem.isFile) {
+                openEditorWindow(selectedItem.path);
             }
-            return true; // Allow default folder navigation
+        });
+    }
+
+    if (pdfButton) {
+        pdfButton.addEventListener('click', () => {
+            if (selectedItem && selectedItem.isFile) {
+                openPdfWindow(selectedItem.path);
+            }
+        });
+    }
+
+    updateToolbarButtons();
+
+    if (contextMenu) {
+        contextMenu.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const action = event.target?.dataset?.action;
+            if (!action || !selectedItem || !selectedItem.isFile) {
+                hideContextMenu();
+                return;
+            }
+            if (action === 'open-editor' && canOpenInEditor(selectedItem)) {
+                openEditorWindow(selectedItem.path);
+            } else if (action === 'preview-pdf' && canPreviewPdf(selectedItem)) {
+                openPdfWindow(selectedItem.path);
+            }
+            hideContextMenu();
+        });
+        contextMenu.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+        });
+    }
+
+    document.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+        if (contextMenu && contextMenu.contains(event.target)) {
+            return;
+        }
+        hideContextMenu();
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            hideContextMenu();
+        }
+    });
+
+    document.addEventListener('scroll', () => {
+        hideContextMenu();
+    }, true);
+
+    window.addEventListener('resize', () => {
+        hideContextMenu();
+    });
+
+    if (fileManagerHost) {
+        fileManagerHost.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+            const item = extractItemFromEvent(event.target);
+            if (item) {
+                cacheItem(item);
+                setSelectedItem(item);
+            }
+
+            if (!selectedItem || !selectedItem.isFile) {
+                hideContextMenu();
+                return;
+            }
+
+            if (!canOpenInEditor(selectedItem) && !canPreviewPdf(selectedItem)) {
+                hideContextMenu();
+                return;
+            }
+
+            showContextMenu(event.clientX, event.clientY);
+        });
+    }
+
+    flmngr.mount(fileManagerHost, {
+        apiKey: "FLMNFLMN",
+        urlFileManager: "/flmngr",
+        onItemClick(item) {
+            cacheItem(item);
+            setSelectedItem(item);
+
+            if (!item.isFile) {
+                return true;
+            }
+
+            const ext = getFileExtension(item.name);
+
+            if (textualExtensions.includes(ext)) {
+                openEditorWindow(item.path);
+                return false;
+            }
+
+            if (pdfExtensions.includes(ext)) {
+                openPdfWindow(item.path);
+                return false;
+            }
+
+            return true;
         }
     });
 });

@@ -25,5 +25,8 @@
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "flmngr": "^2.0.19"
+  },
+  "devDependencies": {
+    "playwright": "^1.45.0"
   }
 }
