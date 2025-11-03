@@ -1,0 +1,85 @@
+/* public/style.css */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: #f0f2f5;
+    margin: 20px;
+}
+
+.editor-window {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 60vw;
+    height: 60vh;
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 8px;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+    display: flex;
+    flex-direction: column;
+    z-index: 1000;
+}
+
+.editor-header {
+    background: #e9e9e9;
+    padding: 8px 12px;
+    border-bottom: 1px solid #ccc;
+    border-radius: 8px 8px 0 0;
+    cursor: move;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.editor-title {
+    font-weight: bold;
+    user-select: none;
+}
+
+.editor-close {
+    background: #ff5f57;
+    border: 1px solid #e24a40;
+    border-radius: 50%;
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+    font-size: 10px;
+    line-height: 12px;
+    padding: 0;
+    color: #8c1913;
+    font-weight: bold;
+}
+.editor-close:hover {
+    background: #e24a40;
+}
+
+.editor-toolbar {
+    padding: 5px;
+    background: #f8f8f8;
+    border-bottom: 1px solid #ddd;
+}
+
+.editor-toolbar button {
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 5px 10px;
+    cursor: pointer;
+}
+.editor-toolbar button:hover {
+    background: #f0f0f0;
+}
+
+.editor-content {
+    flex-grow: 1;
+    overflow: auto;
+    /* This is crucial for Codemirror to size correctly */
+    position: relative;
+    height: 100%;
+}
+
+/* Codemirror height fix */
+.cm-editor {
+    height: 100%;
+}
