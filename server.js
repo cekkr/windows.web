@@ -171,27 +171,170 @@ function isPermissionError(err) {
     return Boolean(err && (err.code === 'EACCES' || err.code === 'EPERM'));
 }
 
+function matchesHidePattern(name, hidePatterns) {
+    for (const entry of hidePatterns) {
+        if (entry.regex.test(name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function listSubdirectories(dirPath, hidePatterns) {
+    const subdirs = [];
+    let dirHandle;
+
+    try {
+        dirHandle = fs.opendirSync(dirPath);
+    } catch (err) {
+        if (isPermissionError(err) || (err && err.code === 'ENOENT')) {
+            return subdirs;
+        }
+        throw err;
+    }
+
+    try {
+        let dirent;
+        while ((dirent = dirHandle.readSync()) !== null) {
+            const name = dirent.name;
+
+            if (matchesHidePattern(name, hidePatterns)) {
+                continue;
+            }
+
+            const childAbsolute = path.join(dirPath, name);
+            let isDir = dirent.isDirectory();
+
+            if (!isDir) {
+                try {
+                    isDir = fs.statSync(childAbsolute).isDirectory();
+                } catch (err) {
+                    if (isPermissionError(err) || (err && err.code === 'ENOENT')) {
+                        continue;
+                    }
+                    console.warn(`[Flmngr] Error inspecting "${childAbsolute}": ${err.message}`);
+                    continue;
+                }
+            }
+
+            if (!isDir) {
+                continue;
+            }
+
+            subdirs.push({ name, absolute: childAbsolute });
+        }
+    } catch (err) {
+        if (!isPermissionError(err) && !(err && err.code === 'ENOENT')) {
+            console.warn(`[Flmngr] Unable to enumerate "${dirPath}": ${err.message}`);
+        }
+    } finally {
+        if (dirHandle) {
+            dirHandle.closeSync();
+        }
+    }
+
+    return subdirs;
+}
+
+function directoryHasSubdirectories(dirPath, hidePatterns) {
+    let dirHandle;
+
+    try {
+        dirHandle = fs.opendirSync(dirPath);
+    } catch (err) {
+        if (isPermissionError(err) || (err && err.code === 'ENOENT')) {
+            return false;
+        }
+        throw err;
+    }
+
+    try {
+        let dirent;
+        while ((dirent = dirHandle.readSync()) !== null) {
+            const name = dirent.name;
+
+            if (matchesHidePattern(name, hidePatterns)) {
+                continue;
+            }
+
+            const childAbsolute = path.join(dirPath, name);
+            let isDir = dirent.isDirectory();
+
+            if (!isDir) {
+                try {
+                    isDir = fs.statSync(childAbsolute).isDirectory();
+                } catch (err) {
+                    if (isPermissionError(err) || (err && err.code === 'ENOENT')) {
+                        continue;
+                    }
+                    console.warn(`[Flmngr] Error inspecting "${childAbsolute}": ${err.message}`);
+                    continue;
+                }
+            }
+
+            if (!isDir) {
+                continue;
+            }
+
+            return true;
+        }
+    } catch (err) {
+        if (!isPermissionError(err) && !(err && err.code === 'ENOENT')) {
+            console.warn(`[Flmngr] Unable to inspect "${dirPath}" for child directories: ${err.message}`);
+        }
+    } finally {
+        if (dirHandle) {
+            dirHandle.closeSync();
+        }
+    }
+
+    return false;
+}
+
 function buildDirectoryListing(baseDir, options = {}) {
     const baseResolved = path.resolve(baseDir);
     const hidePatterns = compileHidePatterns([
         ...toArray(options.hideDirs),
         '.cache'
     ]);
-    const maxDepthRaw = toInteger(options.maxDepth, 99);
-    const maxDepth = Math.max(0, maxDepthRaw);
+
+    const maxDepthProvided = typeof options.maxDepth !== 'undefined'
+        ? toInteger(options.maxDepth, 1)
+        : 1;
+    const maxDepth = Math.max(0, maxDepthProvided);
     const depthLimit = Math.min(maxDepth, 20);
 
+    const rootNameCandidate = baseResolved.replace(/\/+$/, '') || baseResolved;
+    let rootLabel = path.basename(rootNameCandidate);
+    if (!rootLabel || rootLabel === path.sep) {
+        rootLabel = 'Files';
+    }
+
     let fromDir = typeof options.fromDir === 'string' ? options.fromDir : '';
+    fromDir = fromDir.replace(/\\/g, '/');
     fromDir = '/' + fromDir.replace(/^\/+/, '').replace(/\/+$/, '');
     if (fromDir === '/') {
         fromDir = '';
     }
+
     if (fromDir.includes('..')) {
         return [];
     }
+
     const relativeFrom = fromDir.replace(/^\/+/, '');
-    const fromSegments = relativeFrom.length > 0 ? relativeFrom.split('/').filter(Boolean) : [];
-    const startAbsolute = path.resolve(baseResolved, relativeFrom);
+    const rawSegments = relativeFrom.length > 0 ? relativeFrom.split('/').filter(Boolean) : [];
+    let fsSegments = rawSegments;
+
+    if (rawSegments.length > 0 && rawSegments[0] && rawSegments[0].toLowerCase() === rootLabel.toLowerCase()) {
+        fsSegments = rawSegments.slice(1);
+    }
+
+    if (fsSegments.includes('..')) {
+        return [];
+    }
+
+    const fsRelativePath = fsSegments.length > 0 ? path.join(...fsSegments) : '';
+    const startAbsolute = path.resolve(baseResolved, fsRelativePath);
     if (path.relative(baseResolved, startAbsolute).startsWith('..')) {
         return [];
     }
@@ -214,27 +357,27 @@ function buildDirectoryListing(baseDir, options = {}) {
         return [];
     }
 
-    const rootNameCandidate = baseResolved.replace(/\/+$/, '') || baseResolved;
-    let rootLabel = path.basename(rootNameCandidate);
-    if (!rootLabel || rootLabel === path.sep) {
-        rootLabel = 'Files';
-    }
-
-    const prefixSegments = rootLabel ? [rootLabel] : [];
     const results = [];
     const pathsSeen = new Set();
     const visited = new Set();
 
-    function traverse(currentPath, relativeSegments, depth) {
+    function record(displaySegments, depth, hasChildren) {
+        const displayPath = `/${displaySegments.join('/')}`;
+        if (pathsSeen.has(displayPath)) return;
+        results.push({ path: displayPath, hasChildren });
+        pathsSeen.add(displayPath);
+    }
+
+    function traverse(currentPath, currentSegments, depth) {
         let realPath;
         try {
             realPath = fs.realpathSync(currentPath);
         } catch (err) {
-            if (isPermissionError(err)) {
-                console.warn(`[Flmngr] Unable to resolve path "${currentPath}": ${err.code}. Skipping.`);
-                return;
+            if (isPermissionError(err) || (err && err.code === 'ENOENT')) {
+                realPath = currentPath;
+            } else {
+                throw err;
             }
-            realPath = currentPath;
         }
 
         if (visited.has(realPath)) {
@@ -242,69 +385,30 @@ function buildDirectoryListing(baseDir, options = {}) {
         }
         visited.add(realPath);
 
-        const displaySegments = prefixSegments.concat(relativeSegments);
-        const displayPath = `/${displaySegments.join('/')}`;
+        const displaySegments = [rootLabel, ...currentSegments];
+        let childDirs = [];
+        let hasChildren = false;
 
-        if (!pathsSeen.has(displayPath)) {
-            results.push({ path: displayPath, depth });
-            pathsSeen.add(displayPath);
+        if (depth < depthLimit) {
+            childDirs = listSubdirectories(currentPath, hidePatterns);
+            hasChildren = childDirs.length > 0;
+        } else {
+            hasChildren = directoryHasSubdirectories(currentPath, hidePatterns);
         }
+
+        record(displaySegments, depth, hasChildren);
 
         if (depth >= depthLimit) {
             return;
         }
 
-        let entries;
-        try {
-            entries = fs.readdirSync(currentPath, { withFileTypes: true });
-        } catch (err) {
-            if (isPermissionError(err)) {
-                console.warn(`[Flmngr] Unable to list directory "${displayPath}": ${err.code}.`);
-                return;
-            }
-            if (err && err.code === 'ENOENT') {
-                return;
-            }
-            throw err;
+        for (const child of childDirs.sort((a, b) => a.name.localeCompare(b.name))) {
+            traverse(child.absolute, currentSegments.concat(child.name), depth + 1);
         }
-
-        entries
-            .sort((a, b) => a.name.localeCompare(b.name))
-            .forEach(entry => {
-                const name = entry.name;
-                if (hidePatterns.some(pattern => pattern.regex.test(name))) {
-                    return;
-                }
-
-                const childAbsolute = path.join(currentPath, name);
-                let isDir = entry.isDirectory();
-
-                if (!isDir) {
-                    try {
-                        isDir = fs.statSync(childAbsolute).isDirectory();
-                    } catch (err) {
-                        if (isPermissionError(err)) {
-                            console.warn(`[Flmngr] Skipping inaccessible entry "${childAbsolute}": ${err.code}.`);
-                            return;
-                        }
-                        if (err && err.code === 'ENOENT') {
-                            return;
-                        }
-                        console.warn(`[Flmngr] Error inspecting "${childAbsolute}": ${err.message}`);
-                        return;
-                    }
-                }
-
-                if (!isDir) {
-                    return;
-                }
-
-                traverse(childAbsolute, relativeSegments.concat(name), depth + 1);
-            });
     }
 
     try {
-        traverse(startAbsolute, fromSegments, 0);
+        traverse(startAbsolute, fsSegments, 0);
     } catch (err) {
         if (!isPermissionError(err)) {
             throw err;
@@ -313,7 +417,7 @@ function buildDirectoryListing(baseDir, options = {}) {
 
     return results.map(entry => ({
         p: entry.path,
-        filled: entry.depth < depthLimit,
+        filled: entry.hasChildren,
         f: 0,
         d: 0
     }));
@@ -347,10 +451,13 @@ async function handleFlmngrRequest(req, res, filesDir, baseConfig) {
     const action = (toStringOrDefault(req, 'action', '') || '').trim();
 
     if (action === 'dirList') {
+        const hideDirsRaw = req.body ? req.body.hideDirs : [];
+        const maxDepthRaw = req.body ? req.body.maxDepth : undefined;
+        const normalizedMaxDepth = Array.isArray(maxDepthRaw) ? maxDepthRaw[0] : maxDepthRaw;
         const data = buildDirectoryListing(filesDir, {
             fromDir: toStringOrDefault(req, 'fromDir', ''),
-            hideDirs: req.body ? req.body.hideDirs : [],
-            maxDepth: req.body ? req.body.maxDepth : undefined
+            hideDirs: hideDirsRaw,
+            maxDepth: normalizedMaxDepth
         });
         res.status(200).json({ error: null, data });
         return;
