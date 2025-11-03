@@ -2,13 +2,13 @@
 
 // --- Codemirror Setup (ESM from CDN) ---
 // We import exactly what we need, directly from the CDN
-import { EditorState } from "https://unpkg.com/@codemirror/state@6.2.0/dist/index.js";
-import { EditorView, keymap } from "https://unpkg.com/@codemirror/view@6.9.1/dist/index.js";
-import { defaultKeymap } from "https://unpkg.com/@codemirror/commands@6.2.2/dist/index.js";
-import { javascript } from "https://unpkg.com/@codemirror/lang-javascript@6.1.4/dist/index.js";
-import { css } from "https://unpkg.com/@codemirror/lang-css@6.0.2/dist/index.js";
-import { html } from "https://unpkg.com/@codemirror/lang-html@6.4.3/dist/index.js";
-import { json } from "https://unpkg.com/@codemirror/lang-json@6.0.1/dist/index.js";
+import { EditorState } from "https://unpkg.com/@codemirror/state@6.2.0/dist/index.js?module";
+import { EditorView, keymap } from "https://unpkg.com/@codemirror/view@6.9.1/dist/index.js?module";
+import { defaultKeymap } from "https://unpkg.com/@codemirror/commands@6.2.2/dist/index.js?module";
+import { javascript } from "https://unpkg.com/@codemirror/lang-javascript@6.1.4/dist/index.js?module";
+import { css } from "https://unpkg.com/@codemirror/lang-css@6.0.2/dist/index.js?module";
+import { html } from "https://unpkg.com/@codemirror/lang-html@6.4.3/dist/index.js?module";
+import { json } from "https://unpkg.com/@codemirror/lang-json@6.0.1/dist/index.js?module";
 
 // A map to get the correct language highlighter
 const langExtensions = {
